@@ -44,42 +44,109 @@ const firebaseConfig={
 const app=initializeApp(firebaseConfig),auth=getAuth(app),db=getDatabase(app);
 const DEV="하도윤", $=id=>document.getElementById(id);
 const upgrades=[{p:200,r:20,pt:"0.2",rt:"0.02"},{p:450,r:40,pt:"0.45",rt:"0.04"},{p:1000,r:700,pt:"1",rt:"0.7"},{p:10000,r:100,pt:"10",rt:"0.1"}];
-let signup=true,busy=false,user=null,profile=null,unsubscribe=null;
+let signup=true,busy=false,authFlow=false,user=null,profile=null,unsubscribe=null,activeUid=null;
 const fmt=n=>(Number(n||0)/1000).toFixed(3), nk=s=>encodeURIComponent(s.trim().toLowerCase());
 function email(n){const bytes=new TextEncoder().encode(n.trim().toLowerCase());return "n"+Array.from(bytes).map(b=>b.toString(16).padStart(2,"0")).join("")+"@clickgame.invalid";}
+function legacyEmail(n){return encodeURIComponent(n.trim().toLowerCase()).replace(/%/g,"_")+"@clickgame.local";}
+async function signInCompatible(n,pw){
+ let lastError=null;
+ const candidates=[...new Set([email(n),legacyEmail(n)])];
+ for(const candidate of candidates){
+  try{return await signInWithEmailAndPassword(auth,candidate,pw);}
+  catch(e){lastError=e;if(!["auth/invalid-credential","auth/user-not-found","auth/wrong-password","auth/invalid-email"].includes(e.code))throw e;}
+ }
+ throw lastError || new Error("로그인 정보를 확인해 주세요.");
+}
 function note(text,good=false){$("msg").textContent=text;$("msg").style.background=good?"#eaf8ed":"#fff0f0";$("msg").classList.remove("hidden");}
 function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
 function showGame(on){$("auth").classList.toggle("hidden",on);$("game").classList.toggle("hidden",!on);}
 function tr(){return ref(db,"users/"+user.uid);}
 
 $("switch").onclick=()=>{signup=!signup;$("authTitle").textContent=signup?"회원가입":"로그인";$("authBtn").textContent=signup?"회원가입":"로그인";$("switch").textContent=signup?"로그인으로 변경":"회원가입으로 변경";$("reason").classList.toggle("hidden",!signup);$("msg").classList.add("hidden");};
+async function ensureProfile(authUser,nick,reason){
+ const uid=authUser.uid;
+ const profileRef=ref(db,"users/"+uid);
+ const existing=await get(profileRef);
+ if(existing.exists()){
+  let old=existing.val();
+  // 이전 버전의 money/perClick/upgradeLevel 구조를 새 형식으로 1회 변환합니다.
+  if(old.moneyMilli===undefined){
+   const migrated={
+    nick:old.nick||nick,
+    nickKey:old.nickKey||nk(old.nick||nick),
+    reason:String(old.reason||reason||"").slice(0,100),
+    role:old.role==="developer"||old.nick===DEV?"developer":"user",
+    moneyMilli:Math.max(0,Math.round(Number(old.money||0)*1000)),
+    rateMilli:Math.max(0,Math.round(Number(old.perClick===undefined?0.001:old.perClick)*1000)),
+    level:Math.max(0,Math.min(4,Number(old.upgradeLevel||0))),
+    clicks:Math.max(0,Number(old.clicks||0)),
+    createdAt:Number(old.createdAt||Date.now())
+   };
+   await set(profileRef,migrated);
+   old=migrated;
+  }
+  if(old.nick===DEV && old.role==="developer"){
+   const dev=await get(ref(db,"developerUid"));
+   if(!dev.exists())await set(ref(db,"developerUid"),uid);
+  }
+  return old;
+ }
+ const nicknameRef=ref(db,"nicknames/"+nk(nick));
+ const claim=await runTransaction(nicknameRef,old=>old===null?uid:old);
+ if(!claim.committed || claim.snapshot.val()!==uid)throw Error("이미 사용 중인 닉네임입니다.");
+ let role="user";
+ if(nick===DEV){
+  const dev=await get(ref(db,"developerUid"));
+  if(dev.exists() && dev.val()!==uid)throw Error("하도윤 개발자 계정은 이미 예약되어 있습니다.");
+  role="developer";
+ }
+ const doc={nick,nickKey:nk(nick),reason:(reason||"").slice(0,100),role,moneyMilli:0,rateMilli:1,level:0,clicks:0,createdAt:Date.now()};
+ await set(profileRef,doc);
+ if(role==="developer")await set(ref(db,"developerUid"),uid);
+ return doc;
+}
+
 $("authBtn").onclick=async()=>{
  if(busy)return;
  const nick=$("nick").value.trim(),reason=$("reason").value.trim(),pw=$("pw").value;
  if(!/^[가-힣A-Za-z0-9_-]{2,20}$/.test(nick))return note("닉네임은 한글·영문·숫자·_·-로 2~20자 입력하세요.");
  if(pw.length<6)return note("비밀번호는 6자 이상이어야 합니다.");
- busy=true;$("authBtn").disabled=true;let c=null,nref=null;
+ busy=true;authFlow=true;$("authBtn").disabled=true;
  try{
+  let credential;
   if(signup){
-   c=await createUserWithEmailAndPassword(auth,email(nick),pw);
-   nref=ref(db,"nicknames/"+nk(nick));
-   const claim=await runTransaction(nref,old=>old===null?c.user.uid:old);
-   if(!claim.committed||claim.snapshot.val()!==c.user.uid){await deleteUser(c.user);throw Error("이미 사용 중인 닉네임입니다.");}
-   const isDev=nick===DEV;
+   // 구버전에서 생성한 내부 이메일도 먼저 확인해 기존 계정을 복구합니다.
    try{
-    await set(ref(db,"users/"+c.user.uid),{nick,nickKey:nk(nick),reason:reason.slice(0,100),role:isDev?"developer":"user",moneyMilli:0,rateMilli:1,level:0,clicks:0,createdAt:Date.now()});
-    if(isDev)await set(ref(db,"developerUid"),c.user.uid);
-    note("회원가입 완료!",true);
-   }catch(e){try{await remove(nref);}catch(_){}try{await deleteUser(c.user);}catch(_){}throw e;}
-  }else await signInWithEmailAndPassword(auth,email(nick),pw);
+    credential=await signInCompatible(nick,pw);
+   }catch(e){
+    if(!["auth/invalid-credential","auth/user-not-found","auth/wrong-password","auth/invalid-email"].includes(e.code))throw e;
+    try{credential=await createUserWithEmailAndPassword(auth,email(nick),pw);}
+    catch(createError){
+     if(createError.code==="auth/email-already-in-use")credential=await signInCompatible(nick,pw);
+     else throw createError;
+    }
+   }
+  }else{
+   credential=await signInCompatible(nick,pw);
+  }
+  await ensureProfile(credential.user,nick,reason);
+  user=credential.user;
+  await startUser(credential.user);
+  if(signup)note("회원가입/계정 확인 완료!",true);
  }catch(e){
-  let m=e.message||e.code||"오류";
-  if(e.code==="auth/email-already-in-use"||/이미 사용 중/.test(m))m="이미 사용 중인 닉네임입니다.";
-  else if(["auth/invalid-credential","auth/user-not-found","auth/wrong-password"].includes(e.code))m="닉네임 또는 비밀번호가 맞지 않습니다.";
-  else if(e.code==="auth/operation-not-allowed")m="Firebase Authentication에서 이메일/비밀번호 로그인을 켜세요.";
-  else if(/PERMISSION_DENIED|permission_denied|Permission denied/i.test(m))m="저장 권한이 거부됐습니다. ZIP 안의 firebase-rules.json을 데이터베이스 규칙에 적용하세요.";
+  console.error(e);
+  let m=e.message||e.code||"오류가 발생했습니다.";
+  if(e.code==="auth/email-already-in-use")m="이 닉네임의 인증 계정이 이미 있습니다. 같은 비밀번호로 다시 시도하거나 Firebase Authentication의 사용자 목록에서 실패한 테스트 계정을 정리하세요.";
+  else if(["auth/invalid-credential","auth/user-not-found","auth/wrong-password"].includes(e.code))m="닉네임 또는 비밀번호가 맞지 않습니다. 예전 버전에서 가입했다면 회원가입 버튼으로 같은 닉네임/비밀번호를 입력해 계정 복구를 시도하세요.";
+  else if(e.code==="auth/operation-not-allowed")m="Firebase 설정에서 Authentication → 로그인 방법 → 이메일/비밀번호를 사용 설정해야 합니다.";
+  else if(e.code==="auth/invalid-email")m="Firebase 인증에서 내부 이메일 형식을 거부했습니다. 최신 ZIP의 index.html을 사용하고 Authentication 설정을 확인하세요.";
+  else if(e.code==="auth/weak-password")m="비밀번호는 6자 이상으로 입력하세요.";
+  else if(e.code==="auth/too-many-requests")m="시도가 너무 많습니다. 잠시 기다렸다가 다시 시도하세요.";
+  else if(/PERMISSION_DENIED|permission_denied|Permission denied/i.test(m))m="Realtime Database 규칙이 저장되지 않았거나 로그인 권한이 없습니다. ZIP의 firebase-rules.json을 규칙 탭에 붙여넣고 게시했는지 확인하세요.";
   note(m);
- }finally{busy=false;$("authBtn").disabled=false;}
+ }finally{
+  authFlow=false;busy=false;$("authBtn").disabled=false;
+ }
 };
 $("logout").onclick=()=>signOut(auth);
 $("click").onclick=async()=>{
@@ -125,12 +192,23 @@ async function loadDev(){
 }
 $("refresh").onclick=loadDev;
 $("reset").onclick=async()=>{if(!confirm("송금 기록을 모두 초기화할까요?"))return;try{await remove(ref(db,"transfers"));await loadDev();}catch(e){$("transfers").textContent="초기화 실패: "+e.message;}};
-onAuthStateChanged(auth,async u=>{
+async function startUser(u){
+ const uid=u?.uid||null;
+ if(uid && uid===activeUid && profile)return;
  user=u;
- if(!u){if(unsubscribe){unsubscribe();unsubscribe=null;}profile=null;showGame(false);return;}
+ if(!u){
+  activeUid=null;
+  if(unsubscribe){unsubscribe();unsubscribe=null;}
+  profile=null;showGame(false);return;
+ }
  try{
-  const s=await get(ref(db,"users/"+u.uid));if(!s.exists()){note("계정 정보를 찾을 수 없습니다.");await signOut(auth);return;}
-  showGame(true);if(unsubscribe)unsubscribe();
+  const s=await get(ref(db,"users/"+u.uid));
+  if(!s.exists()){
+   note("계정 인증은 됐지만 게임 프로필을 아직 저장하지 못했습니다. 같은 닉네임/비밀번호로 다시 시도해 복구하거나 데이터베이스 규칙을 확인하세요.");
+   showGame(false);return;
+  }
+  activeUid=u.uid;showGame(true);
+  if(unsubscribe)unsubscribe();
   unsubscribe=onValue(ref(db,"users/"+u.uid),snap=>{
    profile=snap.val();if(!profile)return;
    $("hello").textContent=profile.nick+"님"+(profile.role==="developer"?" (개발자)":"");
@@ -138,6 +216,11 @@ onAuthStateChanged(auth,async u=>{
    $("money").textContent=fmt(profile.moneyMilli)+" KRW";$("rate").textContent=fmt(profile.rateMilli);$("clicks").textContent=Number(profile.clicks||0);
    renderShop();loadDev();
   },err=>{$("sendMsg").textContent="불러오기 실패: "+err.message;});
- }catch(e){note("계정 정보를 불러오지 못했습니다: "+e.message);}
+ }catch(e){note("계정 정보를 불러오지 못했습니다: "+e.message);showGame(false);}
+}
+onAuthStateChanged(auth,async u=>{
+ // 회원가입 직후 프로필이 DB에 기록될 때까지 감시 콜백을 잠시 막아 조기 로그아웃을 방지합니다.
+ if(authFlow)return;
+ await startUser(u);
 });
 </script></body></html>
