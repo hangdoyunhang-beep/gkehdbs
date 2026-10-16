@@ -1,0 +1,38 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "nicknames": {
+      "$key": {
+        ".read": "auth != null",
+        ".write": "auth != null && ((!data.exists() && newData.val() === auth.uid) || (data.val() === auth.uid && !newData.exists() && !root.child('users').child(auth.uid).exists()))"
+      }
+    },
+    "developerUid": {
+      ".read": "auth != null && data.val() === auth.uid",
+      ".write": "auth != null && !data.exists() && newData.val() === auth.uid && root.child('users').child(auth.uid).child('nick').val() === '하도윤' && root.child('users').child(auth.uid).child('role').val() === 'developer'"
+    },
+    "users": {
+      ".read": "auth != null && root.child('developerUid').val() === auth.uid",
+      "$uid": {
+        ".read": "auth != null && (auth.uid === $uid || root.child('developerUid').val() === auth.uid)",
+        ".write": "auth != null && ((auth.uid === $uid && ((!data.exists() && root.child('nicknames').child(newData.child('nickKey').val()).val() === auth.uid && ((newData.child('nick').val() === '하도윤' && newData.child('role').val() === 'developer' && !root.child('developerUid').exists()) || (newData.child('nick').val() !== '하도윤' && newData.child('role').val() === 'user'))) || (data.exists() && newData.child('nick').val() === data.child('nick').val() && newData.child('nickKey').val() === data.child('nickKey').val() && newData.child('reason').val() === data.child('reason').val() && newData.child('role').val() === data.child('role').val() && newData.child('createdAt').val() === data.child('createdAt').val() && ((newData.child('moneyMilli').val() === data.child('moneyMilli').val() + data.child('rateMilli').val() && newData.child('clicks').val() === data.child('clicks').val() + 1 && newData.child('rateMilli').val() === data.child('rateMilli').val() && newData.child('level').val() === data.child('level').val()) || (data.child('level').val() === 0 && newData.child('level').val() === 1 && newData.child('moneyMilli').val() === data.child('moneyMilli').val() - 200 && newData.child('rateMilli').val() === 20 && newData.child('clicks').val() === data.child('clicks').val()) || (data.child('level').val() === 1 && newData.child('level').val() === 2 && newData.child('moneyMilli').val() === data.child('moneyMilli').val() - 450 && newData.child('rateMilli').val() === 40 && newData.child('clicks').val() === data.child('clicks').val()) || (data.child('level').val() === 2 && newData.child('level').val() === 3 && newData.child('moneyMilli').val() === data.child('moneyMilli').val() - 1000 && newData.child('rateMilli').val() === 700 && newData.child('clicks').val() === data.child('clicks').val()) || (data.child('level').val() === 3 && newData.child('level').val() === 4 && newData.child('moneyMilli').val() === data.child('moneyMilli').val() - 10000 && newData.child('rateMilli').val() === 100 && newData.child('clicks').val() === data.child('clicks').val()) || (newData.child('moneyMilli').isNumber() && newData.child('moneyMilli').val() >= 0 && newData.child('moneyMilli').val() < data.child('moneyMilli').val() && newData.child('rateMilli').val() === data.child('rateMilli').val() && newData.child('level').val() === data.child('level').val() && newData.child('clicks').val() === data.child('clicks').val())))) || root.child('developerUid').val() === auth.uid)",
+        ".validate": "newData.hasChildren(['nick','nickKey','reason','role','moneyMilli','rateMilli','level','clicks','createdAt'])",
+        "moneyMilli": { ".validate": "newData.isNumber() && newData.val() >= 0" },
+        "rateMilli": { ".validate": "newData.isNumber() && newData.val() >= 0" },
+        "level": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 4" },
+        "clicks": { ".validate": "newData.isNumber() && newData.val() >= 0" },
+        "role": { ".validate": "newData.val() === 'user' || newData.val() === 'developer'" },
+        "reason": { ".validate": "newData.isString() && newData.val().length <= 100" }
+      }
+    },
+    "transfers": {
+      ".read": "auth != null && root.child('developerUid').val() === auth.uid",
+      ".write": "auth != null && root.child('developerUid').val() === auth.uid",
+      "$id": {
+        ".write": "auth != null && ((!data.exists() && newData.child('uid').val() === auth.uid && root.child('users').child(auth.uid).child('role').val() === 'user' && newData.child('nick').val() === root.child('users').child(auth.uid).child('nick').val() && newData.child('amountMilli').isNumber() && newData.child('amountMilli').val() > 0) || root.child('developerUid').val() === auth.uid)",
+        ".validate": "newData.hasChildren(['uid','nick','amountMilli','createdAt'])"
+      }
+    }
+  }
+}

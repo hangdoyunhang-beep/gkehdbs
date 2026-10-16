@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>클릭 머니 게임</title>
+<style>
+*{box-sizing:border-box}body{font-family:Arial,"Malgun Gothic",sans-serif;background:#f3f5fa;color:#222;margin:0}
+main{max-width:850px;margin:auto;padding:18px}.card{background:white;padding:20px;border-radius:16px;margin:14px 0;box-shadow:0 4px 18px #0001}
+input,button{font:inherit;padding:11px;border-radius:10px;margin:5px 0}input{width:100%;border:1px solid #ccd2dc}button{border:0;background:#4c56d9;color:white;cursor:pointer}button.secondary{background:#e8edf5;color:#222}button.danger{background:#c22}button:disabled{opacity:.5}
+.hidden{display:none!important}.small{color:#68707e;font-size:13px}.money{font-size:38px;font-weight:800;text-align:center;margin:16px}.center{text-align:center}.coin{width:175px;height:175px;border-radius:50%;font-size:28px;font-weight:bold}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}.item{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid #e1e5ed;border-radius:12px;padding:12px;margin:8px 0}.notice{padding:10px;background:#edf3ff;border-radius:10px;margin:10px 0}.scroll{overflow:auto}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #e4e7ed;text-align:left;padding:8px;font-size:14px}
+</style></head><body><main>
+<section id="auth" class="card"><h1>💰 클릭 머니 게임</h1><p>Firebase 서버 저장 버전</p>
+<div id="msg" class="notice hidden" aria-live="polite"></div><h2 id="authTitle">회원가입</h2>
+<input id="nick" maxlength="20" placeholder="닉네임 (2~20자)"><input id="reason" maxlength="100" placeholder="하는 이유">
+<input id="pw" type="password" placeholder="비밀번호 (6자 이상)">
+<button id="authBtn">회원가입</button><button id="switch" class="secondary">로그인으로 변경</button>
+<p class="small">하도윤은 개발자 닉네임으로 예약됩니다. 공개하기 전에 먼저 하도윤 계정을 만드세요.</p></section>
+<section id="game" class="hidden">
+<div class="card"><div class="row"><div><b id="hello"></b><div id="reasonView" class="small"></div></div><button id="logout" class="secondary">로그아웃</button></div>
+<div class="center"><div id="money" class="money">0.000 KRW</div><button id="click" class="coin">CLICK</button>
+<p>클릭당 <b id="rate">0.001</b> KRW · 클릭 <b id="clicks">0</b>회</p></div></div>
+<div class="card"><h2>🛒 업그레이드</h2><div id="shop"></div></div>
+<div class="card"><h2>💸 하도윤에게 보내기</h2><p class="small">게임 내 가상 머니입니다.</p>
+<input id="amount" type="number" min="0" step="0.001" placeholder="보낼 금액"><button id="send">보내기</button><div id="sendMsg" class="small"></div></div>
+<div id="dev" class="card hidden"><div class="row"><h2>🛠 개발자 화면 — 하도윤</h2><div><button id="refresh" class="secondary">새로고침</button><button id="reset" class="danger">송금 기록 초기화</button></div></div>
+<h3>사용자별 보유 금액/송금 합계</h3><div id="users" class="scroll"></div><h3>송금 기록</h3><div id="transfers" class="scroll"></div></div>
+</section></main>
+<script type="module">
+import {initializeApp} from "https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js";
+import {getAuth,createUserWithEmailAndPassword,signInWithEmailAndPassword,onAuthStateChanged,signOut,deleteUser}
+from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
+import {getDatabase,ref,get,set,remove,runTransaction,push,onValue}
+from "https://www.gstatic.com/firebasejs/11.10.0/firebase-database.js";
+
+const firebaseConfig={
+ apiKey:"AIzaSyAi1aCJE4qntGyVgFjN_d2oMIu6QgriDPI",
+ authDomain:"zmfflr2-cb430.firebaseapp.com",
+ databaseURL:"https://zmfflr2-cb430-default-rtdb.firebaseio.com",
+ projectId:"zmfflr2-cb430",
+ storageBucket:"zmfflr2-cb430.firebasestorage.app",
+ messagingSenderId:"145603445001",
+ appId:"1:145603445001:web:ea682aaaaa8c623c1f13d8",
+ measurementId:"G-23EPBR8V59"
+};
+const app=initializeApp(firebaseConfig),auth=getAuth(app),db=getDatabase(app);
+const DEV="하도윤", $=id=>document.getElementById(id);
+const upgrades=[{p:200,r:20,pt:"0.2",rt:"0.02"},{p:450,r:40,pt:"0.45",rt:"0.04"},{p:1000,r:700,pt:"1",rt:"0.7"},{p:10000,r:100,pt:"10",rt:"0.1"}];
+let signup=true,busy=false,user=null,profile=null,unsubscribe=null;
+const fmt=n=>(Number(n||0)/1000).toFixed(3), nk=s=>encodeURIComponent(s.trim().toLowerCase());
+function email(n){const bytes=new TextEncoder().encode(n.trim().toLowerCase());return "n"+Array.from(bytes).map(b=>b.toString(16).padStart(2,"0")).join("")+"@clickgame.invalid";}
+function note(text,good=false){$("msg").textContent=text;$("msg").style.background=good?"#eaf8ed":"#fff0f0";$("msg").classList.remove("hidden");}
+function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+function showGame(on){$("auth").classList.toggle("hidden",on);$("game").classList.toggle("hidden",!on);}
+function tr(){return ref(db,"users/"+user.uid);}
+
+$("switch").onclick=()=>{signup=!signup;$("authTitle").textContent=signup?"회원가입":"로그인";$("authBtn").textContent=signup?"회원가입":"로그인";$("switch").textContent=signup?"로그인으로 변경":"회원가입으로 변경";$("reason").classList.toggle("hidden",!signup);$("msg").classList.add("hidden");};
+$("authBtn").onclick=async()=>{
+ if(busy)return;
+ const nick=$("nick").value.trim(),reason=$("reason").value.trim(),pw=$("pw").value;
+ if(!/^[가-힣A-Za-z0-9_-]{2,20}$/.test(nick))return note("닉네임은 한글·영문·숫자·_·-로 2~20자 입력하세요.");
+ if(pw.length<6)return note("비밀번호는 6자 이상이어야 합니다.");
+ busy=true;$("authBtn").disabled=true;let c=null,nref=null;
+ try{
+  if(signup){
+   c=await createUserWithEmailAndPassword(auth,email(nick),pw);
+   nref=ref(db,"nicknames/"+nk(nick));
+   const claim=await runTransaction(nref,old=>old===null?c.user.uid:old);
+   if(!claim.committed||claim.snapshot.val()!==c.user.uid){await deleteUser(c.user);throw Error("이미 사용 중인 닉네임입니다.");}
+   const isDev=nick===DEV;
+   try{
+    await set(ref(db,"users/"+c.user.uid),{nick,nickKey:nk(nick),reason:reason.slice(0,100),role:isDev?"developer":"user",moneyMilli:0,rateMilli:1,level:0,clicks:0,createdAt:Date.now()});
+    if(isDev)await set(ref(db,"developerUid"),c.user.uid);
+    note("회원가입 완료!",true);
+   }catch(e){try{await remove(nref);}catch(_){}try{await deleteUser(c.user);}catch(_){}throw e;}
+  }else await signInWithEmailAndPassword(auth,email(nick),pw);
+ }catch(e){
+  let m=e.message||e.code||"오류";
+  if(e.code==="auth/email-already-in-use"||/이미 사용 중/.test(m))m="이미 사용 중인 닉네임입니다.";
+  else if(["auth/invalid-credential","auth/user-not-found","auth/wrong-password"].includes(e.code))m="닉네임 또는 비밀번호가 맞지 않습니다.";
+  else if(e.code==="auth/operation-not-allowed")m="Firebase Authentication에서 이메일/비밀번호 로그인을 켜세요.";
+  else if(/PERMISSION_DENIED|permission_denied|Permission denied/i.test(m))m="저장 권한이 거부됐습니다. ZIP 안의 firebase-rules.json을 데이터베이스 규칙에 적용하세요.";
+  note(m);
+ }finally{busy=false;$("authBtn").disabled=false;}
+};
+$("logout").onclick=()=>signOut(auth);
+$("click").onclick=async()=>{
+ if(!user||busy)return;busy=true;
+ try{const r=await runTransaction(tr(),u=>{if(!u)return u;u.moneyMilli=Number(u.moneyMilli||0)+Number(u.rateMilli||1);u.clicks=Number(u.clicks||0)+1;return u;});if(!r.committed)throw Error("클릭 저장이 거부됐습니다.");}
+ catch(e){$("sendMsg").textContent="저장 실패: "+e.message;}finally{busy=false;}
+};
+function renderShop(){
+ $("shop").innerHTML="";const level=Number(profile?.level||0);
+ upgrades.forEach((x,i)=>{const row=document.createElement("div");row.className="item";const left=document.createElement("div");left.innerHTML="<b>"+(i+1)+"단계</b><br><span class='small'>가격 "+x.pt+" KRW → 클릭당 "+x.rt+" KRW</span>";
+ const b=document.createElement("button");b.textContent=level>i?"구매 완료":level===i?"구매":"잠김";b.disabled=level!==i;
+ b.onclick=async()=>{if(busy)return;busy=true;try{const r=await runTransaction(tr(),u=>{if(!u||Number(u.level||0)!==i||Number(u.moneyMilli||0)<x.p)return;u.moneyMilli-=x.p;u.rateMilli=x.r;u.level=i+1;return u;});if(!r.committed)$("sendMsg").textContent="돈이 부족하거나 이미 구매했습니다.";}catch(e){$("sendMsg").textContent="업그레이드 저장 실패: "+e.message;}finally{busy=false;}};
+ row.append(left,b);$("shop").append(row);});
+}
+$("send").onclick=async()=>{
+ if(!user||busy)return;const v=Number($("amount").value);
+ if(!Number.isFinite(v)||v<=0)return $("sendMsg").textContent="금액을 올바르게 입력하세요.";
+ if(profile?.role==="developer")return $("sendMsg").textContent="개발자 계정에서는 보낼 수 없습니다.";
+ const amount=Math.round(v*1000);if(Math.abs(v*1000-amount)>1e-6)return $("sendMsg").textContent="소수점 셋째 자리까지 입력하세요.";
+ busy=true;$("send").disabled=true;
+ try{
+  const r=await runTransaction(tr(),u=>{if(!u||Number(u.moneyMilli||0)<amount)return;u.moneyMilli-=amount;return u;});
+  if(!r.committed)throw Error("보유 금액이 부족합니다.");
+  await set(push(ref(db,"transfers")),{uid:user.uid,nick:profile.nick,amountMilli:amount,createdAt:Date.now()});
+  $("amount").value="";$("sendMsg").textContent=fmt(amount)+" KRW를 하도윤에게 보냈습니다.";
+ }catch(e){$("sendMsg").textContent="송금 저장 실패: "+e.message;}finally{busy=false;$("send").disabled=false;}
+};
+async function loadDev(){
+ if(profile?.role!=="developer"){$("dev").classList.add("hidden");return;}
+ $("dev").classList.remove("hidden");
+ try{
+  const us=(await get(ref(db,"users"))).val()||{},ts=(await get(ref(db,"transfers"))).val()||{},totals={};
+  const arr=Object.values(ts).sort((a,b)=>Number(b.createdAt||0)-Number(a.createdAt||0));
+  arr.forEach(t=>totals[t.uid]=(totals[t.uid]||0)+Number(t.amountMilli||0));
+  let a="<table><tr><th>닉네임</th><th>보유 금액</th><th>클릭</th><th>송금 합계</th><th>하는 이유</th></tr>";
+  Object.entries(us).forEach(([uid,u])=>a+="<tr><td>"+esc(u.nick)+(u.role==="developer"?" ★":"")+"</td><td>"+fmt(u.moneyMilli)+"</td><td>"+Number(u.clicks||0)+"</td><td>"+fmt(totals[uid]||0)+"</td><td>"+esc(u.reason)+"</td></tr>");
+  $("users").innerHTML=a+"</table>";
+  if(!arr.length){$("transfers").innerHTML="<p>송금 기록이 없습니다.</p>";return;}
+  let t="<table><tr><th>닉네임</th><th>금액</th><th>시간</th></tr>";
+  arr.forEach(x=>t+="<tr><td>"+esc(x.nick)+"</td><td>"+fmt(x.amountMilli)+" KRW</td><td>"+new Date(x.createdAt).toLocaleString("ko-KR")+"</td></tr>");
+  $("transfers").innerHTML=t+"</table>";
+ }catch(e){$("users").textContent="조회 실패: "+e.message;}
+}
+$("refresh").onclick=loadDev;
+$("reset").onclick=async()=>{if(!confirm("송금 기록을 모두 초기화할까요?"))return;try{await remove(ref(db,"transfers"));await loadDev();}catch(e){$("transfers").textContent="초기화 실패: "+e.message;}};
+onAuthStateChanged(auth,async u=>{
+ user=u;
+ if(!u){if(unsubscribe){unsubscribe();unsubscribe=null;}profile=null;showGame(false);return;}
+ try{
+  const s=await get(ref(db,"users/"+u.uid));if(!s.exists()){note("계정 정보를 찾을 수 없습니다.");await signOut(auth);return;}
+  showGame(true);if(unsubscribe)unsubscribe();
+  unsubscribe=onValue(ref(db,"users/"+u.uid),snap=>{
+   profile=snap.val();if(!profile)return;
+   $("hello").textContent=profile.nick+"님"+(profile.role==="developer"?" (개발자)":"");
+   $("reasonView").textContent=profile.reason?"하는 이유: "+profile.reason:"";
+   $("money").textContent=fmt(profile.moneyMilli)+" KRW";$("rate").textContent=fmt(profile.rateMilli);$("clicks").textContent=Number(profile.clicks||0);
+   renderShop();loadDev();
+  },err=>{$("sendMsg").textContent="불러오기 실패: "+err.message;});
+ }catch(e){note("계정 정보를 불러오지 못했습니다: "+e.message);}
+});
+</script></body></html>
